@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>РостовГессер</title>
+<style>
+  html, body { margin: 0; height: 100%; font: 15px system-ui, sans-serif; background: #111; color: #eee; }
+  #pano { position: absolute; inset: 0; }
+  #hud { position: absolute; left: 12px; top: 12px; z-index: 3; background: #000b; padding: 8px 12px; border-radius: 8px; }
+  #box { position: absolute; right: 12px; bottom: 12px; z-index: 3; display: flex; flex-direction: column; gap: 6px; }
+  #map { width: 320px; height: 220px; border: 2px solid #fff; border-radius: 8px; overflow: hidden; transition: width .2s, height .2s; }
+  #box:hover #map, #box.big #map { width: min(70vw, 900px); height: 60vh; }
+  button { font: inherit; padding: 10px; border: 0; border-radius: 8px; background: #e63946; color: #fff; cursor: pointer; }
+  button:disabled { background: #555; cursor: default; }
+  #start { position: absolute; inset: 0; z-index: 5; display: grid; place-content: center; gap: 10px; background: #111; text-align: center; padding: 16px; }
+</style>
+</head>
+<body>
+<div id="start">
+  <h1>РостовГессер</h1>
+  <p id="err">Загрузка…</p>
+</div>
+<div id="pano"></div>
+<div id="hud"></div>
+<div id="box"><div id="map"></div><button id="btn" disabled>Угадать</button></div>
+
+<script>
+const ROUNDS = 5;
+const BBOX = [[47.18, 39.58], [47.30, 39.80]]; // Ростов-на-Дону, примерно
+const K = 2000; // метров: на таком промахе очки падают в e раз
+const $ = id => document.getElementById(id);
+
+function dist([a, b], [c, d]) {
+  const r = Math.PI / 180;
+  const x = Math.sin((c - a) * r / 2) ** 2 + Math.cos(a * r) * Math.cos(c * r) * Math.sin((d - b) * r / 2) ** 2;
+  return 2 * 6371000 * Math.asin(Math.sqrt(x));
+}
+const score = d => Math.round(5000 * Math.exp(-d / K));
+console.assert(Math.abs(dist([0, 0], [0, 1]) - 111195) < 10 && score(0) === 5000, 'dist/score self-check');
+
+let map, player, mark, truth, round = 0, total = 0, state = 'guess';
+
+// Ключ Яндекс JS API 2.1. Он публичный по природе (виден в браузере) — защищай ограничением по HTTP Referer в кабинете Яндекса.
+const APIKEY = '';
+const key = new URLSearchParams(location.search).get('apikey') || APIKEY;
+if (!key) $('err').textContent = 'Не задан APIKEY в index.html';
+else {
+  const s = document.createElement('script');
+  s.src = `https://api-maps.yandex.ru/2.1/?apikey=${encodeURIComponent(key)}&lang=ru_RU`;
+  s.onload = () => ymaps.ready(init);
+  s.onerror = () => $('err').textContent = 'Не загрузился API Яндекса';
+  document.head.append(s);
+}
+
+async function init() {
+  if (!ymaps.panorama.isSupported()) return $('err').textContent = 'Браузер не поддерживает панорамы';
+  map = new ymaps.Map('map', { center: [47.235, 39.71], zoom: 11, controls: ['zoomControl'] });
+  map.events.add('click', e => {
+    if (state !== 'guess') return;
+    const c = e.get('coords');
+    if (mark) mark.geometry.setCoordinates(c);
+    else map.geoObjects.add(mark = new ymaps.Placemark(c, {}, { preset: 'islands#redDotIcon' }));
+    $('btn').disabled = false;
+  });
+  $('map').addEventListener('transitionend', () => map.container.fitToViewport());
+  $('btn').onclick = () => state === 'guess' ? reveal() : next();
+  $('start').remove();
+  next();
+}
+
+async function randomPano() {
+  for (let i = 0; i < 40; i++) {
+    const p = BBOX[0].map((lo, k) => lo + Math.random() * (BBOX[1][k] - lo));
+    const found = await ymaps.panorama.locate(p);
+    if (found.length) return found[0];
+  }
+  throw new Error('Не нашлось панорам');
+}
+
+async function next() {
+  if (state === 'reveal' && round === ROUNDS) {
+    state = 'over';
+    $('hud').textContent = `Игра окончена: ${total} / ${ROUNDS * 5000}`;
+    $('btn').textContent = 'Заново';
+    return;
+  }
+  if (state === 'over') round = total = 0;
+  round++;
+  state = 'loading';
+  $('box').classList.remove('big');
+  map.geoObjects.removeAll(); mark = null;
+  map.setCenter([47.235, 39.71], 11);
+  $('btn').disabled = true; $('btn').textContent = 'Угадать';
+  let pano;
+  try { pano = await randomPano(); }
+  catch (e) { $('hud').textContent = e.message; return; }
+  truth = pano.getPosition().slice(0, 2);
+  if (player) player.setPanorama(pano);
+  else player = new ymaps.panorama.Player('pano', pano, { controls: [], suppressMapOpenBlock: true });
+  $('hud').textContent = `Раунд ${round}/${ROUNDS} · Очки ${total}`;
+  state = 'guess';
+}
+
+function reveal() {
+  state = 'reveal';
+  const guess = mark.geometry.getCoordinates();
+  const d = dist(guess, truth), s = score(d);
+  total += s;
+  map.geoObjects
+    .add(new ymaps.Placemark(truth, {}, { preset: 'islands#greenDotIcon' }))
+    .add(new ymaps.Polyline([guess, truth], {}, { strokeColor: '#000', strokeStyle: 'dash', strokeWidth: 3 }));
+  $('box').classList.add('big');
+  setTimeout(() => { map.container.fitToViewport(); map.setBounds(map.geoObjects.getBounds(), { checkZoomRange: true, zoomMargin: 40 }); }, 250);
+  $('hud').textContent = `Раунд ${round}/${ROUNDS} · промах ${d < 1000 ? Math.round(d) + ' м' : (d / 1000).toFixed(2) + ' км'} · +${s} · всего ${total}`;
+  $('btn').textContent = round === ROUNDS ? 'Итог' : 'Дальше';
+}
+</script>
+</body>
+</html>
